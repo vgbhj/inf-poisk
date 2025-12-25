@@ -232,10 +232,10 @@ func parseHLTVArticle(id string, slug string) (*Article, error) {
 }
 
 func getHLTVNewsIDs() ([]map[string]string, error) {
-	var articles []map[string]string
-	seen := make(map[string]bool)
-
-	re := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
+	type job struct {
+		year  int
+		month string
+	}
 
 	months := []string{
 		"january", "february", "march", "april",
@@ -244,51 +244,104 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 	}
 
 	currentYear := time.Now().Year()
-	consecutiveErrors := 0
+	maxWorkers := 5
 
-	for year := 2006; year <= currentYear; year++ {
-		for _, month := range months {
-			url := fmt.Sprintf("https://www.hltv.org/news/archive/%d/%s", year, month)
+	jobs := make(chan job)
+	results := make(chan map[string]string)
+	var wg sync.WaitGroup
+	var seen sync.Map // key -> struct{}
 
+	// helper to sanitize slug (remove params, fragments, trailing slashes)
+	cleanSlug := func(raw string) string {
+		if idx := strings.IndexAny(raw, "?#"); idx != -1 {
+			raw = raw[:idx]
+		}
+		return strings.Trim(raw, "/")
+	}
+
+	// воркер
+	worker := func() {
+		defer wg.Done()
+		re := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
+		for j := range jobs {
+			fmt.Printf("start %s %d...\n", j.month, j.year)
+
+			url := fmt.Sprintf("https://www.hltv.org/news/archive/%d/%s", j.year, j.month)
 			doc, err := fetchPage(url)
 			if err != nil {
-				fmt.Printf("  %s %d: load error - %v\n", month, year, err)
-				consecutiveErrors++
-				if consecutiveErrors >= 3 {
-					fmt.Println("multiple 429s detected — sleeping 5 minutes")
-					time.Sleep(5 * time.Minute)
-					consecutiveErrors = 0
-				}
+				fmt.Printf("  %s %d: ERROR fetching page - %v\n", j.month, j.year, err)
+				time.Sleep(300 * time.Millisecond)
 				continue
 			}
 
-			consecutiveErrors = 0
-
-			monthCount := 0
+			foundThisMonth := 0
 			doc.Find("a[href*='/news/']").Each(func(_ int, s *goquery.Selection) {
-				href, _ := s.Attr("href")
-				m := re.FindStringSubmatch(href)
-				if len(m) == 3 {
-					key := m[1] + "/" + m[2]
-					if !seen[key] {
-						seen[key] = true
-						articles = append(articles, map[string]string{
-							"id":   m[1],
-							"slug": m[2],
-						})
-						monthCount++
-					}
+				href, ok := s.Attr("href")
+				if !ok {
+					return
+				}
+				matches := re.FindStringSubmatch(href)
+				if len(matches) != 3 {
+					return
+				}
+				id := matches[1]
+				slug := cleanSlug(matches[2])
+				if slug == "" {
+					return
+				}
+				key := id + "/" + slug
+				_, loaded := seen.LoadOrStore(key, struct{}{})
+				if !loaded {
+					results <- map[string]string{"id": id, "slug": slug}
+					foundThisMonth++
 				}
 			})
 
-			if monthCount > 0 {
-				fmt.Printf("  %s %d: found %d articles\n", month, year, monthCount)
+			if foundThisMonth > 0 {
+				fmt.Printf("  %s %d: processed %d new articles\n", j.month, j.year, foundThisMonth)
+			} else {
+				fmt.Printf("  %s %d: no articles found\n", j.month, j.year)
 			}
 
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond) // polite delay
 		}
 	}
 
+	// стартуем воркеров
+	wg.Add(maxWorkers)
+	for i := 0; i < maxWorkers; i++ {
+		go worker()
+	}
+
+	// feeder: создаём jobs
+	go func() {
+		for year := 2006; year <= currentYear; year++ {
+			for _, m := range months {
+				jobs <- job{year: year, month: m}
+			}
+		}
+		close(jobs)
+	}()
+
+	// собираем результаты в срез
+	var articles []map[string]string
+	collectDone := make(chan struct{})
+	go func() {
+		for r := range results {
+			articles = append(articles, r)
+		}
+		close(collectDone)
+	}()
+
+	// ждём завершения воркеров
+	wg.Wait()
+	close(results)
+	<-collectDone
+
+	if len(articles) == 0 {
+		fmt.Println("ERROR: no HLTV articles found!")
+		return articles, fmt.Errorf("no HLTV articles found")
+	}
 	return articles, nil
 }
 
@@ -488,6 +541,7 @@ func main() {
 		CorpusPath:  corpusDir,
 		BrowserMode: useBrowser,
 	}
+
 	startTime := time.Now()
 
 	if useBrowser {
@@ -503,6 +557,12 @@ func main() {
 		}
 	}
 
+	// go func() {
+	// 	for range time.Tick(3 * time.Second) {
+	// 		fmt.Printf("[STATS] goroutines=%d\n", runtime.NumGoroutine())
+	// 	}
+	// }()
+
 	fmt.Println("Collecting article lists...")
 	fmt.Println("HLTV.org...")
 	hltvArticles, _ := getHLTVNewsIDs()
@@ -511,7 +571,6 @@ func main() {
 	fmt.Println("Cybersport.ru...")
 	cybersportArticles, _ := getCybersportArticles()
 	fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
-
 	total := len(hltvArticles) + len(cybersportArticles)
 	if total < 30000 {
 		fmt.Printf("Warning: found only %d articles, minimum 30000 required\n", total)
