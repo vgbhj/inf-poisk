@@ -27,6 +27,7 @@ var (
 
 	collectOnly  bool
 	downloadOnly bool
+	workers      int
 )
 
 type Article struct {
@@ -222,9 +223,9 @@ func parseHLTVArticle(id string, slug string) (*Article, error) {
 	}
 
 	content := strings.TrimSpace(contentBuilder.String())
-	if len(content) < 500 {
-		return nil, fmt.Errorf("article too short")
-	}
+	// if len(content) < 500 {
+	// 	return nil, fmt.Errorf("article too short")
+	// }
 
 	return &Article{
 		ID:      id,
@@ -260,7 +261,7 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 				consecutiveErrors++
 				if consecutiveErrors >= 3 {
 					fmt.Println("multiple 429s detected — sleeping 5 minutes")
-					time.Sleep(5 * time.Minute)
+					// time.Sleep(5 * time.Minute)
 					consecutiveErrors = 0
 				}
 				continue
@@ -328,9 +329,9 @@ func parseCybersportArticle(tag string, slug string) (*Article, error) {
 	}
 
 	content := strings.TrimSpace(contentBuilder.String())
-	if len(content) < 500 {
-		return nil, fmt.Errorf("article too short")
-	}
+	// if len(content) < 500 {
+	// 	return nil, fmt.Errorf("article too short")
+	// }
 
 	return &Article{
 		ID:      slug,
@@ -348,11 +349,39 @@ func getCybersportArticles() ([]map[string]string, error) {
 	tags := []string{"dota-2", "cs2", "valorant", "league-of-legends", "overwatch", "apex-legends", "rainbow-six", "rocket-league"}
 
 	for _, tag := range tags {
-		page := 1
+		fmt.Printf("Processing tag: %s\n", tag)
+
+		if !useBrowser || browser == nil {
+			fmt.Printf("Warning: browser not available, skipping %s (requires browser for dynamic loading)\n", tag)
+			continue
+		}
+
+		page := browser.MustPage("")
+		defer page.MustClose()
+
+		url := fmt.Sprintf("https://www.cybersport.ru/tags/%s", tag)
+
+		err := rod.Try(func() {
+			page.MustNavigate(url)
+			page.MustWaitLoad()
+			time.Sleep(2 * time.Second)
+		})
+
+		if err != nil {
+			fmt.Printf("Failed to load %s: %v\n", tag, err)
+			continue
+		}
+
 		for len(articles) < 25000 {
-			url := fmt.Sprintf("https://www.cybersport.ru/tags/%s?page=%d", tag, page)
-			doc, err := fetchPage(url)
+			html, err := page.HTML()
 			if err != nil {
+				fmt.Printf("Failed to get HTML for %s: %v\n", tag, err)
+				break
+			}
+
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+			if err != nil {
+				fmt.Printf("Failed to parse HTML for %s: %v\n", tag, err)
 				break
 			}
 
@@ -382,12 +411,33 @@ func getCybersportArticles() ([]map[string]string, error) {
 			})
 
 			if !found {
+				fmt.Printf("  %s: no new articles found, stopping\n", tag)
 				break
 			}
 
-			page++
-			time.Sleep(500 * time.Millisecond)
+			fmt.Printf("  %s: found %d articles so far\n", tag, len(articles))
+
+			btn := page.MustElements(`button.button_+fnen`)
+			if len(btn) == 0 {
+				fmt.Printf("  %s: 'Show more' button not found, stopping\n", tag)
+				break
+			}
+
+			err = rod.Try(func() {
+				btn[0].MustClick()
+				time.Sleep(2 * time.Second)
+				page.MustWaitIdle()
+			})
+
+			if err != nil {
+				fmt.Printf("  %s: failed to click 'Show more' button: %v\n", tag, err)
+				break
+			}
+
+			time.Sleep(1000 * time.Millisecond)
 		}
+
+		fmt.Printf("  %s: collected %d articles total\n", tag, len(articles))
 	}
 
 	return articles, nil
@@ -428,53 +478,120 @@ func saveArticle(article *Article, baseDir string) error {
 }
 
 func downloadHLTVArticles(articles []map[string]string, corpusDir string, bar *pb.ProgressBar, stats *Statistics, mu *sync.Mutex) {
-	for _, articleInfo := range articles {
-		article, err := parseHLTVArticle(articleInfo["id"], articleInfo["slug"])
-		if err != nil {
-			bar.Increment()
-			continue
-		}
+	jobsChan := make(chan map[string]string, len(articles))
+	var wg sync.WaitGroup
 
-		err = saveArticle(article, corpusDir)
-		if err != nil {
-			bar.Increment()
-			continue
-		}
-
-		mu.Lock()
-		stats.HLTVArticles++
-		stats.TotalArticles++
-		stats.TotalSize += int64(len(article.Content))
-		mu.Unlock()
-
-		bar.Increment()
-		// time.Sleep(200 * time.Millisecond)
+	numWorkers := workers
+	if numWorkers <= 0 {
+		numWorkers = 1
 	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for articleInfo := range jobsChan {
+				articleID := articleInfo["id"]
+				articleSlug := articleInfo["slug"]
+
+				hltvDir := filepath.Join(corpusDir, "hltv")
+				safeID := sanitizeFilename(articleID)
+				filePath := filepath.Join(hltvDir, safeID+".txt")
+
+				if _, err := os.Stat(filePath); err == nil {
+					fmt.Printf("[HLTV] Skipped (already downloaded): %s\n", articleID)
+					bar.Increment()
+					continue
+				}
+
+				article, err := parseHLTVArticle(articleID, articleSlug)
+				if err != nil {
+					fmt.Printf("[HLTV] Failed to parse %s: %v\n", articleID, err)
+					bar.Increment()
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				if strings.Contains(article.Content, "Verify you are human by completing the action below") {
+					fmt.Printf("[HLTV] Skipped (Cloudflare block): %s\n", articleID)
+					bar.Increment()
+					continue
+				}
+
+				err = saveArticle(article, corpusDir)
+				if err != nil {
+					fmt.Printf("[HLTV] Failed to save %s: %v\n", articleID, err)
+					bar.Increment()
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				mu.Lock()
+				stats.HLTVArticles++
+				stats.TotalArticles++
+				stats.TotalSize += int64(len(article.Content))
+				mu.Unlock()
+
+				fmt.Printf("[HLTV] ✓ Downloaded: %s - %s\n", articleID, article.Title)
+				bar.Increment()
+				time.Sleep(300 * time.Millisecond)
+			}
+		}()
+	}
+
+	for _, articleInfo := range articles {
+		jobsChan <- articleInfo
+	}
+	close(jobsChan)
+
+	wg.Wait()
 }
 
 func downloadCybersportArticles(articles []map[string]string, corpusDir string, bar *pb.ProgressBar, stats *Statistics, mu *sync.Mutex) {
-	for _, articleInfo := range articles {
-		article, err := parseCybersportArticle(articleInfo["tag"], articleInfo["slug"])
-		if err != nil {
-			bar.Increment()
-			continue
-		}
+	jobsChan := make(chan map[string]string, len(articles))
+	var wg sync.WaitGroup
 
-		err = saveArticle(article, corpusDir)
-		if err != nil {
-			bar.Increment()
-			continue
-		}
-
-		mu.Lock()
-		stats.CybersportArticles++
-		stats.TotalArticles++
-		stats.TotalSize += int64(len(article.Content))
-		mu.Unlock()
-
-		bar.Increment()
-		// time.Sleep(200 * time.Millisecond)
+	numWorkers := workers
+	if numWorkers <= 0 {
+		numWorkers = 2
 	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for articleInfo := range jobsChan {
+				article, err := parseCybersportArticle(articleInfo["tag"], articleInfo["slug"])
+				if err != nil {
+					fmt.Printf("[Cybersport] Failed to parse %s/%s: %v\n", articleInfo["tag"], articleInfo["slug"], err)
+					bar.Increment()
+					continue
+				}
+
+				err = saveArticle(article, corpusDir)
+				if err != nil {
+					fmt.Printf("[Cybersport] Failed to save %s: %v\n", article.ID, err)
+					bar.Increment()
+					continue
+				}
+
+				mu.Lock()
+				stats.CybersportArticles++
+				stats.TotalArticles++
+				stats.TotalSize += int64(len(article.Content))
+				mu.Unlock()
+
+				bar.Increment()
+			}
+		}()
+	}
+
+	for _, articleInfo := range articles {
+		jobsChan <- articleInfo
+	}
+	close(jobsChan)
+
+	wg.Wait()
 }
 
 // CSV helpers (minimal, compatible with original structures)
@@ -582,6 +699,7 @@ func main() {
 	flag.BoolVar(&browserDebug, "debug", false, "Enable browser debug mode")
 	flag.BoolVar(&collectOnly, "collect-only", false, "Only collect article links and save to CSV")
 	flag.BoolVar(&downloadOnly, "download-only", false, "Only download articles from CSV files (skip collection)")
+	flag.IntVar(&workers, "workers", 4, "Number of parallel workers for downloading (default: 4)")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
