@@ -532,7 +532,7 @@ func downloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 				stats.TotalSize += int64(len(article.Content))
 				mu.Unlock()
 
-				fmt.Printf("[HLTV] ✓ Downloaded: %s - %s\n", articleID, article.Title)
+				fmt.Printf("[HLTV] Downloaded: %s - %s\n", articleID, article.Title)
 				bar.Increment()
 				time.Sleep(300 * time.Millisecond)
 			}
