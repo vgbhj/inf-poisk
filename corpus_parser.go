@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,6 +24,9 @@ var (
 	useBrowser   bool
 	showBrowser  bool
 	browserDebug bool
+
+	collectOnly  bool
+	downloadOnly bool
 )
 
 type Article struct {
@@ -232,10 +236,10 @@ func parseHLTVArticle(id string, slug string) (*Article, error) {
 }
 
 func getHLTVNewsIDs() ([]map[string]string, error) {
-	type job struct {
-		year  int
-		month string
-	}
+	var articles []map[string]string
+	seen := make(map[string]bool)
+
+	re := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
 
 	months := []string{
 		"january", "february", "march", "april",
@@ -244,104 +248,51 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 	}
 
 	currentYear := time.Now().Year()
-	maxWorkers := 5
+	consecutiveErrors := 0
 
-	jobs := make(chan job)
-	results := make(chan map[string]string)
-	var wg sync.WaitGroup
-	var seen sync.Map // key -> struct{}
+	for year := 2006; year <= currentYear; year++ {
+		for _, month := range months {
+			url := fmt.Sprintf("https://www.hltv.org/news/archive/%d/%s", year, month)
 
-	// helper to sanitize slug (remove params, fragments, trailing slashes)
-	cleanSlug := func(raw string) string {
-		if idx := strings.IndexAny(raw, "?#"); idx != -1 {
-			raw = raw[:idx]
-		}
-		return strings.Trim(raw, "/")
-	}
-
-	// воркер
-	worker := func() {
-		defer wg.Done()
-		re := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
-		for j := range jobs {
-			fmt.Printf("start %s %d...\n", j.month, j.year)
-
-			url := fmt.Sprintf("https://www.hltv.org/news/archive/%d/%s", j.year, j.month)
 			doc, err := fetchPage(url)
 			if err != nil {
-				fmt.Printf("  %s %d: ERROR fetching page - %v\n", j.month, j.year, err)
-				time.Sleep(300 * time.Millisecond)
+				fmt.Printf("  %s %d: load error - %v\n", month, year, err)
+				consecutiveErrors++
+				if consecutiveErrors >= 3 {
+					fmt.Println("multiple 429s detected — sleeping 5 minutes")
+					time.Sleep(5 * time.Minute)
+					consecutiveErrors = 0
+				}
 				continue
 			}
 
-			foundThisMonth := 0
+			consecutiveErrors = 0
+
+			monthCount := 0
 			doc.Find("a[href*='/news/']").Each(func(_ int, s *goquery.Selection) {
-				href, ok := s.Attr("href")
-				if !ok {
-					return
-				}
-				matches := re.FindStringSubmatch(href)
-				if len(matches) != 3 {
-					return
-				}
-				id := matches[1]
-				slug := cleanSlug(matches[2])
-				if slug == "" {
-					return
-				}
-				key := id + "/" + slug
-				_, loaded := seen.LoadOrStore(key, struct{}{})
-				if !loaded {
-					results <- map[string]string{"id": id, "slug": slug}
-					foundThisMonth++
+				href, _ := s.Attr("href")
+				m := re.FindStringSubmatch(href)
+				if len(m) == 3 {
+					key := m[1] + "/" + m[2]
+					if !seen[key] {
+						seen[key] = true
+						articles = append(articles, map[string]string{
+							"id":   m[1],
+							"slug": m[2],
+						})
+						monthCount++
+					}
 				}
 			})
 
-			if foundThisMonth > 0 {
-				fmt.Printf("  %s %d: processed %d new articles\n", j.month, j.year, foundThisMonth)
-			} else {
-				fmt.Printf("  %s %d: no articles found\n", j.month, j.year)
+			if monthCount > 0 {
+				fmt.Printf("  %s %d: found %d articles\n", month, year, monthCount)
 			}
 
-			time.Sleep(300 * time.Millisecond) // polite delay
+			time.Sleep(1500 * time.Millisecond)
 		}
 	}
 
-	// стартуем воркеров
-	wg.Add(maxWorkers)
-	for i := 0; i < maxWorkers; i++ {
-		go worker()
-	}
-
-	// feeder: создаём jobs
-	go func() {
-		for year := 2006; year <= currentYear; year++ {
-			for _, m := range months {
-				jobs <- job{year: year, month: m}
-			}
-		}
-		close(jobs)
-	}()
-
-	// собираем результаты в срез
-	var articles []map[string]string
-	collectDone := make(chan struct{})
-	go func() {
-		for r := range results {
-			articles = append(articles, r)
-		}
-		close(collectDone)
-	}()
-
-	// ждём завершения воркеров
-	wg.Wait()
-	close(results)
-	<-collectDone
-
-	if len(articles) == 0 {
-		fmt.Println("ERROR: no HLTV articles found!")
-		return articles, fmt.Errorf("no HLTV articles found")
-	}
 	return articles, nil
 }
 
@@ -497,7 +448,7 @@ func downloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 		mu.Unlock()
 
 		bar.Increment()
-		time.Sleep(200 * time.Millisecond)
+		// time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -522,14 +473,115 @@ func downloadCybersportArticles(articles []map[string]string, corpusDir string, 
 		mu.Unlock()
 
 		bar.Increment()
-		time.Sleep(200 * time.Millisecond)
+		// time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// CSV helpers (minimal, compatible with original structures)
+func writeHLTVCSV(path string, articles []map[string]string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	// header
+	if err := w.Write([]string{"id", "slug"}); err != nil {
+		return err
+	}
+
+	for _, a := range articles {
+		if err := w.Write([]string{a["id"], a["slug"]}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readHLTVCSV(path string) ([]map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	var res []map[string]string
+	for i, row := range rows {
+		if i == 0 {
+			// header
+			continue
+		}
+		if len(row) < 2 {
+			continue
+		}
+		res = append(res, map[string]string{"id": row[0], "slug": row[1]})
+	}
+	return res, nil
+}
+
+func writeCybersportCSV(path string, articles []map[string]string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	// header
+	if err := w.Write([]string{"tag", "slug"}); err != nil {
+		return err
+	}
+
+	for _, a := range articles {
+		if err := w.Write([]string{a["tag"], a["slug"]}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readCybersportCSV(path string) ([]map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	var res []map[string]string
+	for i, row := range rows {
+		if i == 0 {
+			// header
+			continue
+		}
+		if len(row) < 2 {
+			continue
+		}
+		res = append(res, map[string]string{"tag": row[0], "slug": row[1]})
+	}
+	return res, nil
 }
 
 func main() {
 	flag.BoolVar(&useBrowser, "b", false, "Use browser to bypass Cloudflare")
 	flag.BoolVar(&showBrowser, "show", false, "Show browser window (only with -b)")
 	flag.BoolVar(&browserDebug, "debug", false, "Enable browser debug mode")
+	flag.BoolVar(&collectOnly, "collect-only", false, "Only collect article links and save to CSV")
+	flag.BoolVar(&downloadOnly, "download-only", false, "Only download articles from CSV files (skip collection)")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
@@ -537,11 +589,13 @@ func main() {
 	corpusDir := "corpus"
 	os.MkdirAll(corpusDir, 0755)
 
+	hltvCSVPath := filepath.Join(corpusDir, "hltv_links.csv")
+	cybersportCSVPath := filepath.Join(corpusDir, "cybersport_links.csv")
+
 	stats := &Statistics{
 		CorpusPath:  corpusDir,
 		BrowserMode: useBrowser,
 	}
-
 	startTime := time.Now()
 
 	if useBrowser {
@@ -557,20 +611,54 @@ func main() {
 		}
 	}
 
-	// go func() {
-	// 	for range time.Tick(3 * time.Second) {
-	// 		fmt.Printf("[STATS] goroutines=%d\n", runtime.NumGoroutine())
-	// 	}
-	// }()
+	var hltvArticles []map[string]string
+	var cybersportArticles []map[string]string
 
-	fmt.Println("Collecting article lists...")
-	fmt.Println("HLTV.org...")
-	hltvArticles, _ := getHLTVNewsIDs()
-	fmt.Printf("Found %d HLTV articles\n", len(hltvArticles))
+	if downloadOnly {
+		fmt.Println("Download-only mode: reading lists from CSV...")
+		h, err := readHLTVCSV(hltvCSVPath)
+		if err != nil {
+			fmt.Printf("Failed to read HLTV CSV (%s): %v\n", hltvCSVPath, err)
+			return
+		}
+		c, err := readCybersportCSV(cybersportCSVPath)
+		if err != nil {
+			fmt.Printf("Failed to read Cybersport CSV (%s): %v\n", cybersportCSVPath, err)
+			return
+		}
+		hltvArticles = h
+		cybersportArticles = c
+		fmt.Printf("Read %d HLTV links and %d Cybersport links from CSV\n", len(hltvArticles), len(cybersportArticles))
+	} else {
+		// Collect lists
+		fmt.Println("Collecting article lists...")
+		fmt.Println("HLTV.org...")
+		h, _ := getHLTVNewsIDs()
+		hltvArticles = h
+		fmt.Printf("Found %d HLTV articles\n", len(hltvArticles))
 
-	fmt.Println("Cybersport.ru...")
-	cybersportArticles, _ := getCybersportArticles()
-	fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
+		fmt.Println("Cybersport.ru...")
+		c, _ := getCybersportArticles()
+		cybersportArticles = c
+		fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
+
+		// If collect-only: write CSV and exit
+		if collectOnly {
+			fmt.Println("Collect-only mode: writing CSVs and exiting...")
+			if err := writeHLTVCSV(hltvCSVPath, hltvArticles); err != nil {
+				fmt.Printf("Failed to write HLTV CSV: %v\n", err)
+			} else {
+				fmt.Printf("HLTV links written to %s\n", hltvCSVPath)
+			}
+			if err := writeCybersportCSV(cybersportCSVPath, cybersportArticles); err != nil {
+				fmt.Printf("Failed to write Cybersport CSV: %v\n", err)
+			} else {
+				fmt.Printf("Cybersport links written to %s\n", cybersportCSVPath)
+			}
+			return
+		}
+	}
+
 	total := len(hltvArticles) + len(cybersportArticles)
 	if total < 30000 {
 		fmt.Printf("Warning: found only %d articles, minimum 30000 required\n", total)
