@@ -77,8 +77,13 @@ func initBrowser(show, debug bool) (*rod.Browser, error) {
 	}
 
 	url := launch.MustLaunch()
-	b := rod.New().ControlURL(url).MustConnect()
-	b.MustIgnoreCertErrors(true)
+	b := rod.New().ControlURL(url).MustConnect().Trace(true)
+	// b := rod.New().
+	// 	ControlURL(launcher.New().Headless(false).MustLaunch()). // Показать окно браузера
+	// 	Trace(true).                                             // Подсвечивать действия
+	// 	SlowMotion(1 * time.Second).                             // Замедлить действия, чтобы успеть заметить
+	// 	MustConnect()
+	// b.MustIgnoreCertErrors(true)
 
 	return b, nil
 }
@@ -406,98 +411,111 @@ func getCybersportArticles() ([]map[string]string, error) {
 
 	for _, tag := range tags {
 		fmt.Printf("Processing tag: %s\n", tag)
-
-		if !useBrowser || browser == nil {
-			fmt.Printf("Warning: browser not available, skipping %s (requires browser for dynamic loading)\n", tag)
-			continue
-		}
-
 		page := browser.MustPage("")
 		defer page.MustClose()
 
 		url := fmt.Sprintf("https://www.cybersport.ru/tags/%s", tag)
-
 		err := rod.Try(func() {
 			page.MustNavigate(url)
 			page.MustWaitLoad()
-			time.Sleep(2 * time.Second)
 		})
-
 		if err != nil {
-			fmt.Printf("Failed to load %s: %v\n", tag, err)
 			continue
 		}
 
-		extractCookiesFromPage(page, "cybersport.ru")
-
+		noNewAttempts := 0
 		for len(articles) < 25000 {
-			html, err := page.HTML()
-			if err != nil {
-				fmt.Printf("Failed to get HTML for %s: %v\n", tag, err)
-				break
+			// 1. АГРЕССИВНАЯ ОЧИСТКА ПУТИ ДЛЯ КЛИКА
+			page.MustEval(`() => {
+				// Удаляем всё, что может перекрывать кнопку (куки, плавающие банеры)
+				const overlays = document.querySelectorAll('.accept-cookies-text, [class*="Header_sticky"], [class*="Cookie"]');
+				overlays.forEach(el => el.remove());
+
+				// Разблокируем скролл, если он был заморожен банером
+				document.body.style.pointerEvents = 'auto';
+				document.body.style.overflow = 'auto';
+				document.documentElement.style.overflow = 'auto';
+			}`)
+
+			// 2. ПОИСК И ПОДГОТОВКА КНОПКИ
+			// Используем селектор по части класса (из-за спецсимвола +)
+			btn, err := page.Element(`button[class*="button_+fnen"]`)
+
+			if err == nil && btn != nil {
+				_ = rod.Try(func() {
+					// Прокручиваем так, чтобы кнопка была чуть выше центра (избегаем перекрытия скрытыми элементами)
+					btn.MustScrollIntoView()
+					page.Mouse.MustScroll(0, -200)
+					time.Sleep(500 * time.Millisecond)
+
+					// Кликаем "честным" методом (эмуляция мыши по координатам)
+					// Если этот метод не сработает, Rod выбросит ошибку и мы попробуем JS-клик
+					errClick := rod.Try(func() {
+						btn.MustClick()
+					})
+
+					if errClick != nil {
+						// Резервный вариант: Прямой JS клик с вызовом событий
+						btn.MustEval(`el => {
+							el.focus();
+							el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+							el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+							el.click();
+						}`)
+					}
+
+					// Ждем именно появления новых данных (изменения DOM)
+					time.Sleep(2 * time.Second)
+					page.MustWaitRequestIdle()
+				})
+			} else {
+				// Если кнопка не найдена в DOM, пробуем скролл (возможно, она подгрузится)
+				page.Mouse.MustScroll(0, 3000)
+				time.Sleep(1 * time.Second)
 			}
 
-			doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
-			if err != nil {
-				fmt.Printf("Failed to parse HTML for %s: %v\n", tag, err)
-				break
-			}
+			// 3. СБОР СТАТЕЙ
+			html := page.MustHTML()
+			doc, _ := goquery.NewDocumentFromReader(strings.NewReader(html))
 
-			found := false
+			foundInIteration := 0
 			doc.Find("a[href*='/tags/" + tag + "/']").Each(func(i int, s *goquery.Selection) {
 				href, exists := s.Attr("href")
 				if !exists {
 					return
 				}
 
-				re := regexp.MustCompile(`/tags/` + tag + `/([^?]+)`)
+				// Регулярка для отсеивания страниц пагинации и мусора
+				re := regexp.MustCompile(`/tags/` + tag + `/([^?#]+)`)
 				matches := re.FindStringSubmatch(href)
 				if len(matches) == 2 {
 					slug := strings.Trim(matches[1], "/")
-					if slug != "" && slug != tag {
+					// Проверяем, что это слаг новости, а не служебная ссылка
+					if slug != "" && slug != tag && !strings.Contains(slug, "page") {
 						key := tag + "/" + slug
 						if !seen[key] {
 							seen[key] = true
-							articles = append(articles, map[string]string{
-								"tag":  tag,
-								"slug": slug,
-							})
-							found = true
+							articles = append(articles, map[string]string{"tag": tag, "slug": slug})
+							foundInIteration++
 						}
 					}
 				}
 			})
 
-			if !found {
-				fmt.Printf("  %s: no new articles found, stopping\n", tag)
-				break
+			if foundInIteration > 0 {
+				noNewAttempts = 0
+				fmt.Printf("  %s: +%d (всего: %d)\n", tag, foundInIteration, len(articles))
+			} else {
+				noNewAttempts++
+				if noNewAttempts >= 6 { // Даем больше шансов на медленную прогрузку
+					fmt.Printf("  %s: достигнут конец или ошибка загрузки\n", tag)
+					break
+				}
+				// Если новых нет, попробуем еще раз проскроллить
+				page.Mouse.MustScroll(0, 1500)
 			}
-
-			fmt.Printf("  %s: found %d articles so far\n", tag, len(articles))
-
-			btn := page.MustElements(`button.button_+fnen`)
-			if len(btn) == 0 {
-				fmt.Printf("  %s: 'Show more' button not found, stopping\n", tag)
-				break
-			}
-
-			err = rod.Try(func() {
-				btn[0].MustClick()
-				time.Sleep(2 * time.Second)
-				page.MustWaitIdle()
-			})
-
-			if err != nil {
-				fmt.Printf("  %s: failed to click 'Show more' button: %v\n", tag, err)
-				break
-			}
-
-			time.Sleep(1000 * time.Millisecond)
 		}
-
-		fmt.Printf("  %s: collected %d articles total\n", tag, len(articles))
 	}
-
 	return articles, nil
 }
 
