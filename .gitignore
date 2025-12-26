@@ -1,6 +1,7 @@
 MAI-IR/
 corpus/
 browser_data/
+arch/
 
 # Go binaries
 *.exe

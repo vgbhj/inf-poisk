@@ -6,6 +6,8 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.1
 	github.com/cheggaaa/pb/v3 v3.1.4
 	github.com/go-rod/rod v0.116.2
+	github.com/go-rod/stealth v0.4.9
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -24,4 +26,3 @@ require (
 	golang.org/x/net v0.7.0 // indirect
 	golang.org/x/sys v0.6.0 // indirect
 )
-

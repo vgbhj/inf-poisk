@@ -28,6 +28,7 @@ var (
 	collectOnly  bool
 	downloadOnly bool
 	workers      int
+	site         string
 )
 
 type Article struct {
@@ -60,6 +61,9 @@ var (
 	}
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	browser   *rod.Browser
+
+	cfCookies   = make(map[string]string)
+	cookiesLock sync.RWMutex
 )
 
 func initBrowser(show, debug bool) (*rod.Browser, error) {
@@ -77,6 +81,23 @@ func initBrowser(show, debug bool) (*rod.Browser, error) {
 	b.MustIgnoreCertErrors(true)
 
 	return b, nil
+}
+
+func extractCookiesFromPage(page *rod.Page, domain string) {
+	cookies, err := page.Cookies([]string{})
+	if err != nil {
+		return
+	}
+
+	cookiesLock.Lock()
+	defer cookiesLock.Unlock()
+
+	for _, cookie := range cookies {
+		if cookie.Name == "cf_clearance" {
+			cfCookies[domain] = cookie.Value
+			break
+		}
+	}
 }
 
 func sleepWithJitter(base time.Duration, attempt int) {
@@ -118,6 +139,15 @@ func httpFetchPage(url string) (*goquery.Document, error) {
 		req.Header.Set("Sec-Fetch-User", "?1")
 		req.Header.Set("Cache-Control", "max-age=0")
 
+		cookiesLock.RLock()
+		for domain, cookie := range cfCookies {
+			if strings.Contains(url, domain) {
+				req.Header.Set("Cookie", "cf_clearance="+cookie)
+				break
+			}
+		}
+		cookiesLock.RUnlock()
+
 		resp, err := client.Do(req)
 		if err != nil {
 			sleepWithJitter(baseDelay, attempt)
@@ -147,6 +177,21 @@ func httpFetchPage(url string) (*goquery.Document, error) {
 		if err != nil {
 			sleepWithJitter(baseDelay, attempt)
 			continue
+		}
+
+		html, _ := doc.Html()
+		if !strings.Contains(html, "challenge-form") &&
+			!strings.Contains(html, "Cloudflare") &&
+			!strings.Contains(html, "cf-browser-verification") {
+			for _, cookie := range resp.Cookies() {
+				if cookie.Name == "cf_clearance" {
+					domain := resp.Request.URL.Hostname()
+					cookiesLock.Lock()
+					cfCookies[domain] = cookie.Value
+					cookiesLock.Unlock()
+					break
+				}
+			}
 		}
 
 		return doc, nil
@@ -183,12 +228,25 @@ func browserFetchPage(url string) (*goquery.Document, error) {
 		return nil, fmt.Errorf("browser navigation failed: %w", err)
 	}
 
+	domain := extractDomain(url)
+	extractCookiesFromPage(page, domain)
+
 	html, err := page.HTML()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get HTML: %w", err)
 	}
 
 	return goquery.NewDocumentFromReader(strings.NewReader(html))
+}
+
+func extractDomain(urlStr string) string {
+	if strings.Contains(urlStr, "hltv.org") {
+		return "hltv.org"
+	}
+	if strings.Contains(urlStr, "cybersport.ru") {
+		return "cybersport.ru"
+	}
+	return ""
 }
 
 func parseHLTVArticle(id string, slug string) (*Article, error) {
@@ -223,9 +281,6 @@ func parseHLTVArticle(id string, slug string) (*Article, error) {
 	}
 
 	content := strings.TrimSpace(contentBuilder.String())
-	// if len(content) < 500 {
-	// 	return nil, fmt.Errorf("article too short")
-	// }
 
 	return &Article{
 		ID:      id,
@@ -240,7 +295,7 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 	var articles []map[string]string
 	seen := make(map[string]bool)
 
-	re := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
+	re := regexp.MustCompile(`/news/(\d+)/(?:[^/]+)`)
 
 	months := []string{
 		"january", "february", "march", "april",
@@ -261,7 +316,6 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 				consecutiveErrors++
 				if consecutiveErrors >= 3 {
 					fmt.Println("multiple 429s detected — sleeping 5 minutes")
-					// time.Sleep(5 * time.Minute)
 					consecutiveErrors = 0
 				}
 				continue
@@ -273,15 +327,20 @@ func getHLTVNewsIDs() ([]map[string]string, error) {
 			doc.Find("a[href*='/news/']").Each(func(_ int, s *goquery.Selection) {
 				href, _ := s.Attr("href")
 				m := re.FindStringSubmatch(href)
-				if len(m) == 3 {
-					key := m[1] + "/" + m[2]
-					if !seen[key] {
-						seen[key] = true
-						articles = append(articles, map[string]string{
-							"id":   m[1],
-							"slug": m[2],
-						})
-						monthCount++
+				if len(m) >= 2 {
+					// try to extract full id and slug by matching the full pattern
+					r2 := regexp.MustCompile(`/news/(\d+)/([^/]+)`)
+					m2 := r2.FindStringSubmatch(href)
+					if len(m2) == 3 {
+						key := m2[1] + "/" + m2[2]
+						if !seen[key] {
+							seen[key] = true
+							articles = append(articles, map[string]string{
+								"id":   m2[1],
+								"slug": m2[2],
+							})
+							monthCount++
+						}
 					}
 				}
 			})
@@ -329,9 +388,6 @@ func parseCybersportArticle(tag string, slug string) (*Article, error) {
 	}
 
 	content := strings.TrimSpace(contentBuilder.String())
-	// if len(content) < 500 {
-	// 	return nil, fmt.Errorf("article too short")
-	// }
 
 	return &Article{
 		ID:      slug,
@@ -371,6 +427,8 @@ func getCybersportArticles() ([]map[string]string, error) {
 			fmt.Printf("Failed to load %s: %v\n", tag, err)
 			continue
 		}
+
+		extractCookiesFromPage(page, "cybersport.ru")
 
 		for len(articles) < 25000 {
 			html, err := page.HTML()
@@ -594,7 +652,6 @@ func downloadCybersportArticles(articles []map[string]string, corpusDir string, 
 	wg.Wait()
 }
 
-// CSV helpers (minimal, compatible with original structures)
 func writeHLTVCSV(path string, articles []map[string]string) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -605,7 +662,6 @@ func writeHLTVCSV(path string, articles []map[string]string) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	// header
 	if err := w.Write([]string{"id", "slug"}); err != nil {
 		return err
 	}
@@ -633,7 +689,6 @@ func readHLTVCSV(path string) ([]map[string]string, error) {
 	var res []map[string]string
 	for i, row := range rows {
 		if i == 0 {
-			// header
 			continue
 		}
 		if len(row) < 2 {
@@ -654,7 +709,6 @@ func writeCybersportCSV(path string, articles []map[string]string) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	// header
 	if err := w.Write([]string{"tag", "slug"}); err != nil {
 		return err
 	}
@@ -682,7 +736,6 @@ func readCybersportCSV(path string) ([]map[string]string, error) {
 	var res []map[string]string
 	for i, row := range rows {
 		if i == 0 {
-			// header
 			continue
 		}
 		if len(row) < 2 {
@@ -700,6 +753,7 @@ func main() {
 	flag.BoolVar(&collectOnly, "collect-only", false, "Only collect article links and save to CSV")
 	flag.BoolVar(&downloadOnly, "download-only", false, "Only download articles from CSV files (skip collection)")
 	flag.IntVar(&workers, "workers", 4, "Number of parallel workers for downloading (default: 4)")
+	flag.StringVar(&site, "site", "both", "Which site to process: hltv, cybersport, both")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
@@ -732,52 +786,77 @@ func main() {
 	var hltvArticles []map[string]string
 	var cybersportArticles []map[string]string
 
+	site = strings.ToLower(site)
+	validSite := site == "hltv" || site == "cybersport" || site == "both"
+	if !validSite {
+		fmt.Printf("Invalid site '%s', defaulting to 'both'\n", site)
+		site = "both"
+	}
+
 	if downloadOnly {
 		fmt.Println("Download-only mode: reading lists from CSV...")
-		h, err := readHLTVCSV(hltvCSVPath)
-		if err != nil {
-			fmt.Printf("Failed to read HLTV CSV (%s): %v\n", hltvCSVPath, err)
-			return
+		if site == "hltv" || site == "both" {
+			h, err := readHLTVCSV(hltvCSVPath)
+			if err != nil {
+				fmt.Printf("Failed to read HLTV CSV (%s): %v\n", hltvCSVPath, err)
+				return
+			}
+			hltvArticles = h
 		}
-		c, err := readCybersportCSV(cybersportCSVPath)
-		if err != nil {
-			fmt.Printf("Failed to read Cybersport CSV (%s): %v\n", cybersportCSVPath, err)
-			return
+		if site == "cybersport" || site == "both" {
+			c, err := readCybersportCSV(cybersportCSVPath)
+			if err != nil {
+				fmt.Printf("Failed to read Cybersport CSV (%s): %v\n", cybersportCSVPath, err)
+				return
+			}
+			cybersportArticles = c
 		}
-		hltvArticles = h
-		cybersportArticles = c
 		fmt.Printf("Read %d HLTV links and %d Cybersport links from CSV\n", len(hltvArticles), len(cybersportArticles))
 	} else {
-		// Collect lists
 		fmt.Println("Collecting article lists...")
-		fmt.Println("HLTV.org...")
-		h, _ := getHLTVNewsIDs()
-		hltvArticles = h
-		fmt.Printf("Found %d HLTV articles\n", len(hltvArticles))
+		if site == "hltv" || site == "both" {
+			fmt.Println("HLTV.org...")
+			h, _ := getHLTVNewsIDs()
+			hltvArticles = h
+			fmt.Printf("Found %d HLTV articles\n", len(hltvArticles))
+		}
 
-		fmt.Println("Cybersport.ru...")
-		c, _ := getCybersportArticles()
-		cybersportArticles = c
-		fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
+		if site == "cybersport" || site == "both" {
+			fmt.Println("Cybersport.ru...")
+			c, _ := getCybersportArticles()
+			cybersportArticles = c
+			fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
+		}
 
-		// If collect-only: write CSV and exit
 		if collectOnly {
 			fmt.Println("Collect-only mode: writing CSVs and exiting...")
-			if err := writeHLTVCSV(hltvCSVPath, hltvArticles); err != nil {
-				fmt.Printf("Failed to write HLTV CSV: %v\n", err)
-			} else {
-				fmt.Printf("HLTV links written to %s\n", hltvCSVPath)
+			if site == "hltv" || site == "both" {
+				if err := writeHLTVCSV(hltvCSVPath, hltvArticles); err != nil {
+					fmt.Printf("Failed to write HLTV CSV: %v\n", err)
+				} else {
+					fmt.Printf("HLTV links written to %s\n", hltvCSVPath)
+				}
 			}
-			if err := writeCybersportCSV(cybersportCSVPath, cybersportArticles); err != nil {
-				fmt.Printf("Failed to write Cybersport CSV: %v\n", err)
-			} else {
-				fmt.Printf("Cybersport links written to %s\n", cybersportCSVPath)
+			if site == "cybersport" || site == "both" {
+				if err := writeCybersportCSV(cybersportCSVPath, cybersportArticles); err != nil {
+					fmt.Printf("Failed to write Cybersport CSV: %v\n", err)
+				} else {
+					fmt.Printf("Cybersport links written to %s\n", cybersportCSVPath)
+				}
 			}
 			return
 		}
 	}
 
-	total := len(hltvArticles) + len(cybersportArticles)
+	// compute total based on selected sources
+	total := 0
+	if site == "hltv" || site == "both" {
+		total += len(hltvArticles)
+	}
+	if site == "cybersport" || site == "both" {
+		total += len(cybersportArticles)
+	}
+
 	if total < 30000 {
 		fmt.Printf("Warning: found only %d articles, minimum 30000 required\n", total)
 	}
@@ -789,15 +868,34 @@ func main() {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		downloadHLTVArticles(hltvArticles, corpusDir, bar, stats, &mu)
-	}()
-	go func() {
-		defer wg.Done()
-		downloadCybersportArticles(cybersportArticles, corpusDir, bar, stats, &mu)
-	}()
+	// start download goroutines only for selected sites
+	workersCount := 0
+	if site == "hltv" || site == "both" {
+		workersCount++
+	}
+	if site == "cybersport" || site == "both" {
+		workersCount++
+	}
+
+	if workersCount == 0 {
+		fmt.Println("No sites selected to download")
+		return
+	}
+
+	wg.Add(workersCount)
+
+	if site == "hltv" || site == "both" {
+		go func() {
+			defer wg.Done()
+			downloadHLTVArticles(hltvArticles, corpusDir, bar, stats, &mu)
+		}()
+	}
+	if site == "cybersport" || site == "both" {
+		go func() {
+			defer wg.Done()
+			downloadCybersportArticles(cybersportArticles, corpusDir, bar, stats, &mu)
+		}()
+	}
 
 	wg.Wait()
 	bar.Finish()
