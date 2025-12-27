@@ -63,7 +63,7 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 				articleID := articleInfo["id"]
 				articleSlug := articleInfo["slug"]
 
-				hltvDir := filepath.Join(corpusDir, "hltv")
+				hltvDir := filepath.Join(corpusDir, "hltv/raw")
 				safeID := SanitizeFilename(articleID)
 				htmlFilename := safeID + ".html"
 				htmlPath := filepath.Join(hltvDir, htmlFilename)
@@ -138,7 +138,7 @@ func DownloadCybersportArticles(articles []map[string]string, corpusDir string, 
 				slug := articleInfo["slug"]
 				safeName := SanitizeFilename(tag + "__" + slug)
 
-				csDir := filepath.Join(corpusDir, "cybersport")
+				csDir := filepath.Join(corpusDir, "cybersport/raw")
 				htmlFilename := safeName + ".html"
 				htmlPath := filepath.Join(csDir, htmlFilename)
 
