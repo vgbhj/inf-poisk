@@ -6,8 +6,6 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.1
 	github.com/cheggaaa/pb/v3 v3.1.4
 	github.com/go-rod/rod v0.116.2
-	github.com/go-rod/stealth v0.4.9
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
