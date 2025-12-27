@@ -2,8 +2,6 @@ package parser
 
 import (
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,17 +35,15 @@ func SaveRawHTML(html string, dir, filename string) error {
 }
 
 func FetchURLHTML(url string) (string, error) {
-	resp, err := http.Get(url)
+	doc, err := FetchPage(url)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	html, err := doc.Html()
 	if err != nil {
 		return "", err
 	}
-	return string(body), nil
+	return html, nil
 }
 
 func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *pb.ProgressBar, stats *Statistics, mu *sync.Mutex, workers int) {
