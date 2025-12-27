@@ -2,15 +2,54 @@ package parser
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/cheggaaa/pb/v3"
 )
 
-// DownloadHLTVArticles downloads HLTV articles in parallel
+func IsBlockedHTML(content string) error {
+	badMarkers := []string{
+		"Verify you are human",
+		"Checking your browser",
+		"Enable JavaScript",
+		"Access denied",
+	}
+	for _, m := range badMarkers {
+		if strings.Contains(content, m) {
+			return fmt.Errorf("blocked page marker detected: %s", m)
+		}
+	}
+	return nil
+}
+
+func SaveRawHTML(html string, dir, filename string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	fpath := filepath.Join(dir, filename)
+	return os.WriteFile(fpath, []byte(html), 0o644)
+}
+
+func FetchURLHTML(url string) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *pb.ProgressBar, stats *Statistics, mu *sync.Mutex, workers int) {
 	jobsChan := make(chan map[string]string, len(articles))
 	var wg sync.WaitGroup
@@ -30,37 +69,35 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 
 				hltvDir := filepath.Join(corpusDir, "hltv")
 				safeID := SanitizeFilename(articleID)
-				filePath := filepath.Join(hltvDir, safeID+".txt")
+				htmlFilename := safeID + ".html"
+				htmlPath := filepath.Join(hltvDir, htmlFilename)
 
-				if _, err := os.Stat(filePath); err == nil {
-					fmt.Printf("[HLTV] Skipped (already downloaded): %s\n", articleID)
+				if _, err := os.Stat(htmlPath); err == nil {
+					fmt.Printf("[HLTV] Skipped (raw html exists): %s\n", articleID)
 					bar.Increment()
 					continue
 				}
 
-				article, err := ParseHLTVArticle(articleID, articleSlug)
+				url := BuildHLTVURL(articleID, articleSlug)
+
+				html, err := FetchURLHTML(url)
 				if err != nil {
-					fmt.Printf("[HLTV] Failed to parse %s: %v\n", articleID, err)
+					fmt.Printf("[HLTV] Failed to download %s: %v\n", articleID, err)
 					bar.Increment()
 					time.Sleep(500 * time.Millisecond)
 					continue
 				}
 
-				if err := IsEmptyHLTVArticle(article); err != nil {
-					fmt.Printf(
-						"[HLTV] Skipped empty article %s (%s): %v\n",
-						articleID,
-						article.URL,
-						err,
-					)
+				if err := IsBlockedHTML(html); err != nil {
+					fmt.Printf("[HLTV] Blocked (anti-bot) %s: %v\n", articleID, err)
 					bar.Increment()
+					_ = SaveRawHTML(html, filepath.Join(hltvDir, "blocked"), htmlFilename)
 					time.Sleep(300 * time.Millisecond)
 					continue
 				}
 
-				err = SaveArticle(article, corpusDir)
-				if err != nil {
-					fmt.Printf("[HLTV] Failed to save %s: %v\n", articleID, err)
+				if err := SaveRawHTML(html, hltvDir, htmlFilename); err != nil {
+					fmt.Printf("[HLTV] Failed to save raw html %s: %v\n", articleID, err)
 					bar.Increment()
 					time.Sleep(500 * time.Millisecond)
 					continue
@@ -69,10 +106,10 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 				mu.Lock()
 				stats.HLTVArticles++
 				stats.TotalArticles++
-				stats.TotalSize += int64(len(article.Content))
+				stats.TotalSize += int64(len(html))
 				mu.Unlock()
 
-				fmt.Printf("[HLTV] Downloaded: %s - %s\n", articleID, article.Title)
+				fmt.Printf("[HLTV] Downloaded raw HTML: %s\n", articleID)
 				bar.Increment()
 				time.Sleep(300 * time.Millisecond)
 			}
@@ -87,7 +124,6 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 	wg.Wait()
 }
 
-// DownloadCybersportArticles downloads Cybersport articles in parallel
 func DownloadCybersportArticles(articles []map[string]string, corpusDir string, bar *pb.ProgressBar, stats *Statistics, mu *sync.Mutex, workers int) {
 	jobsChan := make(chan map[string]string, len(articles))
 	var wg sync.WaitGroup
@@ -102,27 +138,54 @@ func DownloadCybersportArticles(articles []map[string]string, corpusDir string, 
 		go func() {
 			defer wg.Done()
 			for articleInfo := range jobsChan {
-				article, err := ParseCybersportArticle(articleInfo["tag"], articleInfo["slug"])
-				if err != nil {
-					fmt.Printf("[Cybersport] Failed to parse %s/%s: %v\n", articleInfo["tag"], articleInfo["slug"], err)
+				tag := articleInfo["tag"]
+				slug := articleInfo["slug"]
+				safeName := SanitizeFilename(tag + "__" + slug)
+
+				csDir := filepath.Join(corpusDir, "cybersport")
+				htmlFilename := safeName + ".html"
+				htmlPath := filepath.Join(csDir, htmlFilename)
+
+				if _, err := os.Stat(htmlPath); err == nil {
+					fmt.Printf("[Cybersport] Skipped (raw html exists): %s/%s\n", tag, slug)
 					bar.Increment()
 					continue
 				}
 
-				err = SaveArticle(article, corpusDir)
+				url := BuildCybersportURL(tag, slug)
+
+				html, err := FetchURLHTML(url)
 				if err != nil {
-					fmt.Printf("[Cybersport] Failed to save %s: %v\n", article.ID, err)
+					fmt.Printf("[Cybersport] Failed to download %s/%s: %v\n", tag, slug, err)
 					bar.Increment()
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
+
+				if err := IsBlockedHTML(html); err != nil {
+					fmt.Printf("[Cybersport] Blocked (anti-bot) %s/%s: %v\n", tag, slug, err)
+					bar.Increment()
+					_ = SaveRawHTML(html, filepath.Join(csDir, "blocked"), htmlFilename)
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+
+				if err := SaveRawHTML(html, csDir, htmlFilename); err != nil {
+					fmt.Printf("[Cybersport] Failed to save raw html %s/%s: %v\n", tag, slug, err)
+					bar.Increment()
+					time.Sleep(500 * time.Millisecond)
 					continue
 				}
 
 				mu.Lock()
 				stats.CybersportArticles++
 				stats.TotalArticles++
-				stats.TotalSize += int64(len(article.Content))
+				stats.TotalSize += int64(len(html))
 				mu.Unlock()
 
+				fmt.Printf("[Cybersport] Downloaded raw HTML: %s/%s\n", tag, slug)
 				bar.Increment()
+				time.Sleep(300 * time.Millisecond)
 			}
 		}()
 	}
@@ -133,4 +196,12 @@ func DownloadCybersportArticles(articles []map[string]string, corpusDir string, 
 	close(jobsChan)
 
 	wg.Wait()
+}
+
+func BuildHLTVURL(articleID, slug string) string {
+	return fmt.Sprintf("https://www.hltv.org/news/%s/%s", articleID, slug)
+}
+
+func BuildCybersportURL(tag, slug string) string {
+	return fmt.Sprintf("https://www.cybersport.ru/tags/%s/%s", tag, slug)
 }

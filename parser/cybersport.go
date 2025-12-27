@@ -10,7 +10,6 @@ import (
 	"github.com/go-rod/rod"
 )
 
-// ParseCybersportArticle parses a single Cybersport article
 func ParseCybersportArticle(tag string, slug string) (*Article, error) {
 	url := fmt.Sprintf("https://www.cybersport.ru/tags/%s/%s", tag, slug)
 	doc, err := FetchPage(url)
@@ -57,7 +56,8 @@ func ParseCybersportArticle(tag string, slug string) (*Article, error) {
 func GetCybersportArticles() ([]map[string]string, error) {
 	var articles []map[string]string
 	seen := make(map[string]bool)
-	tags := []string{"dota-2", "cs2"}
+	// tags := []string{"dota-2", "cs2"}
+	tags := []string{"cs2"}
 
 	for _, tag := range tags {
 		fmt.Printf("Tag: %s\n", tag)
