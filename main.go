@@ -17,6 +17,217 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		firstArg := os.Args[1]
+
+		if firstArg == "add-to-db" {
+			runAddToDB()
+			return
+		}
+
+		if strings.HasSuffix(firstArg, ".yaml") || strings.HasSuffix(firstArg, ".yml") {
+			if _, err := os.Stat(firstArg); err == nil {
+				runYAMLMode(firstArg)
+				return
+			}
+		}
+	}
+
+	runLegacyMode()
+}
+
+func runYAMLMode(configPath string) {
+	cfg, err := parser.LoadYAMLConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	rand.Seed(time.Now().UnixNano())
+
+	db, err := parser.NewDatabase(cfg.DB.URI, cfg.DB.Database, cfg.DB.Collection)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to connect to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	fmt.Println("Connected to MongoDB successfully")
+
+	corpusDir := "corpus"
+	os.MkdirAll(corpusDir, 0755)
+
+	hltvCSVPath := filepath.Join(corpusDir, "hltv_links.csv")
+	cybersportCSVPath := filepath.Join(corpusDir, "cybersport_links.csv")
+
+	stats := &parser.Statistics{
+		CorpusPath:  corpusDir,
+		BrowserMode: cfg.Browser.UseBrowser,
+	}
+	startTime := time.Now()
+
+	if cfg.Browser.UseBrowser {
+		fmt.Println("Initializing browser...")
+		var err error
+		parser.Browser, err = parser.InitBrowser(cfg.Browser.ShowBrowser, cfg.Browser.BrowserDebug)
+		if err != nil {
+			fmt.Printf("Failed to initialize browser: %v\n", err)
+			fmt.Println("Falling back to HTTP client...")
+			cfg.Browser.UseBrowser = false
+			stats.BrowserMode = false
+		} else {
+			defer parser.Browser.MustClose()
+		}
+	}
+
+	resumeURL := ""
+	lastURL, err := db.GetLastProcessedURL()
+	if err == nil && lastURL != "" {
+		fmt.Printf("Found last processed URL: %s\n", lastURL)
+		fmt.Print("Resume from last position? (y/n): ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) == "y" {
+			resumeURL = lastURL
+			fmt.Println("Resuming from last position...")
+		}
+	}
+
+	reCrawlEnabled := cfg.Logic.ReCrawlInterval > 0
+	if reCrawlEnabled {
+		fmt.Printf("Re-crawl enabled: checking documents older than %d seconds...\n", cfg.Logic.ReCrawlInterval)
+		docsToReCrawl, err := db.GetDocumentsForReCrawl(cfg.Logic.ReCrawlInterval)
+		if err == nil && len(docsToReCrawl) > 0 {
+			fmt.Printf("Found %d documents to re-crawl\n", len(docsToReCrawl))
+		}
+	}
+
+	var hltvArticles []map[string]string
+	var cybersportArticles []map[string]string
+
+	cfg.Site = strings.ToLower(cfg.Site)
+	validSite := cfg.Site == "hltv" || cfg.Site == "cybersport" || cfg.Site == "both"
+	if !validSite {
+		fmt.Printf("Invalid site '%s', defaulting to 'both'\n", cfg.Site)
+		cfg.Site = "both"
+	}
+
+	fmt.Println("Collecting article lists...")
+	if cfg.Site == "hltv" || cfg.Site == "both" {
+		fmt.Println("HLTV.org...")
+		if _, err := os.Stat(hltvCSVPath); err == nil {
+			h, err := parser.ReadHLTVCSV(hltvCSVPath)
+			if err == nil {
+				hltvArticles = h
+				fmt.Printf("Read %d HLTV articles from CSV\n", len(hltvArticles))
+			} else {
+				fmt.Printf("Failed to read HLTV CSV, collecting new...\n")
+				h, _ := parser.GetHLTVNewsIDs()
+				hltvArticles = h
+				parser.WriteHLTVCSV(hltvCSVPath, hltvArticles)
+			}
+		} else {
+			h, _ := parser.GetHLTVNewsIDs()
+			hltvArticles = h
+			fmt.Printf("Found %d HLTV articles\n", len(hltvArticles))
+			parser.WriteHLTVCSV(hltvCSVPath, hltvArticles)
+		}
+	}
+
+	if cfg.Site == "cybersport" || cfg.Site == "both" {
+		fmt.Println("Cybersport.ru...")
+		if _, err := os.Stat(cybersportCSVPath); err == nil {
+			c, err := parser.ReadCybersportCSV(cybersportCSVPath)
+			if err == nil {
+				cybersportArticles = c
+				fmt.Printf("Read %d Cybersport articles from CSV\n", len(cybersportArticles))
+			} else {
+				fmt.Printf("Failed to read Cybersport CSV, collecting new...\n")
+				c, _ := parser.GetCybersportArticles()
+				cybersportArticles = c
+				parser.WriteCybersportCSV(cybersportCSVPath, cybersportArticles)
+			}
+		} else {
+			c, _ := parser.GetCybersportArticles()
+			cybersportArticles = c
+			fmt.Printf("Found %d Cybersport articles\n", len(cybersportArticles))
+			parser.WriteCybersportCSV(cybersportCSVPath, cybersportArticles)
+		}
+	}
+
+	total := 0
+	if cfg.Site == "hltv" || cfg.Site == "both" {
+		total += len(hltvArticles)
+	}
+	if cfg.Site == "cybersport" || cfg.Site == "both" {
+		total += len(cybersportArticles)
+	}
+
+	if total == 0 {
+		fmt.Println("No articles to process")
+		return
+	}
+
+	fmt.Printf("Total articles to process: %d\n", total)
+	fmt.Printf("Delay between pages: %d ms\n", cfg.Logic.DelayBetweenPages)
+
+	bar := pb.New(total)
+	bar.SetTemplateString(`{{counters . }} {{bar . }} {{percent . }} {{etime . }}`)
+	bar.Start()
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	crawlerCfg := &parser.CrawlerConfig{
+		Database:      db,
+		CorpusDir:     corpusDir,
+		DelayMs:       cfg.Logic.DelayBetweenPages,
+		ReCrawl:       reCrawlEnabled,
+		ReCrawlInt:    cfg.Logic.ReCrawlInterval,
+		ResumeFromURL: resumeURL,
+	}
+
+	workersCount := 0
+	if cfg.Site == "hltv" || cfg.Site == "both" {
+		workersCount++
+	}
+	if cfg.Site == "cybersport" || cfg.Site == "both" {
+		workersCount++
+	}
+
+	if workersCount == 0 {
+		fmt.Println("No sites selected to download")
+		return
+	}
+
+	wg.Add(workersCount)
+
+	if cfg.Site == "hltv" || cfg.Site == "both" {
+		go func() {
+			defer wg.Done()
+			parser.DownloadHLTVArticlesWithDB(hltvArticles, crawlerCfg, bar, stats, &mu, cfg.Workers)
+		}()
+	}
+	if cfg.Site == "cybersport" || cfg.Site == "both" {
+		go func() {
+			defer wg.Done()
+			parser.DownloadCybersportArticlesWithDB(cybersportArticles, crawlerCfg, bar, stats, &mu, cfg.Workers)
+		}()
+	}
+
+	wg.Wait()
+	bar.Finish()
+
+	stats.DownloadTime = time.Since(startTime).String()
+
+	statsJSON, _ := json.MarshalIndent(stats, "", "  ")
+	os.WriteFile(filepath.Join(corpusDir, "statistics.json"), statsJSON, 0644)
+
+	fmt.Printf("\nCompleted. Downloaded articles: %d\n", stats.TotalArticles)
+	fmt.Printf("Statistics saved to %s/statistics.json\n", corpusDir)
+}
+
+func runLegacyMode() {
 	cfg := &parser.Config{}
 
 	flag.BoolVar(&cfg.UseBrowser, "b", false, "Use browser to bypass Cloudflare")
@@ -178,4 +389,49 @@ func main() {
 
 	fmt.Printf("\nCompleted. Downloaded articles: %d\n", stats.TotalArticles)
 	fmt.Printf("Statistics saved to %s/statistics.json\n", corpusDir)
+}
+
+func runAddToDB() {
+	var configPath string
+	var source string
+
+	flagSet := flag.NewFlagSet("add-to-db", flag.ExitOnError)
+	flagSet.StringVar(&configPath, "config", "config.yaml", "Path to YAML config file")
+	flagSet.StringVar(&source, "source", "", "Source to add: hltv or cybersport (required)")
+	flagSet.Parse(os.Args[2:])
+
+	if source == "" {
+		fmt.Fprintf(os.Stderr, "Error: -source is required (hltv or cybersport)\n")
+		flagSet.Usage()
+		os.Exit(1)
+	}
+
+	if source != "hltv" && source != "cybersport" {
+		fmt.Fprintf(os.Stderr, "Error: source must be 'hltv' or 'cybersport'\n")
+		os.Exit(1)
+	}
+
+	cfg, err := parser.LoadYAMLConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	db, err := parser.NewDatabase(cfg.DB.URI, cfg.DB.Database, cfg.DB.Collection)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to connect to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	fmt.Printf("Connected to MongoDB successfully\n")
+	fmt.Printf("Adding existing %s pages to database...\n", source)
+
+	corpusDir := "corpus"
+	if err := parser.AddExistingPagesToDB(corpusDir, db, source); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Done!")
 }

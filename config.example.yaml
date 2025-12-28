@@ -1,0 +1,25 @@
+# Example configuration file for the crawler
+
+# Database configuration
+db:
+  uri: "mongodb://localhost:27017"
+  database: "crawler_db"
+  collection: "documents"
+
+# Crawler logic configuration
+logic:
+  delay_between_pages: 500  # Delay in milliseconds between page crawls
+  re_crawl_interval: 86400  # Re-crawl interval in seconds (86400 = 1 day, 0 = disabled)
+
+# Browser configuration (optional)
+browser:
+  use_browser: false
+  show_browser: false
+  browser_debug: false
+
+# Number of parallel workers (optional, default: 4)
+workers: 4
+
+# Site selection: hltv, cybersport, or both (optional, default: both)
+site: "both"
+
