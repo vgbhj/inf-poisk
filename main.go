@@ -42,7 +42,6 @@ func main() {
 	}
 	startTime := time.Now()
 
-	// Initialize browser if needed
 	if cfg.UseBrowser {
 		fmt.Println("Initializing browser...")
 		var err error
@@ -67,7 +66,6 @@ func main() {
 		cfg.Site = "both"
 	}
 
-	// Collection or download mode
 	if cfg.DownloadOnly {
 		fmt.Println("Download-only mode: reading lists from CSV...")
 		if cfg.Site == "hltv" || cfg.Site == "both" {
@@ -123,7 +121,6 @@ func main() {
 		}
 	}
 
-	// Compute total articles
 	total := 0
 	if cfg.Site == "hltv" || cfg.Site == "both" {
 		total += len(hltvArticles)
@@ -136,7 +133,6 @@ func main() {
 		fmt.Printf("Warning: found only %d articles, minimum 30000 required\n", total)
 	}
 
-	// Progress bar
 	bar := pb.New(total)
 	bar.SetTemplateString(`{{counters . }} {{bar . }} {{percent . }} {{etime . }}`)
 	bar.Start()
@@ -144,7 +140,6 @@ func main() {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Count download goroutines
 	workersCount := 0
 	if cfg.Site == "hltv" || cfg.Site == "both" {
 		workersCount++
@@ -160,7 +155,6 @@ func main() {
 
 	wg.Add(workersCount)
 
-	// Start parallel downloads
 	if cfg.Site == "hltv" || cfg.Site == "both" {
 		go func() {
 			defer wg.Done()
@@ -179,7 +173,6 @@ func main() {
 
 	stats.DownloadTime = time.Since(startTime).String()
 
-	// Save statistics
 	statsJSON, _ := json.MarshalIndent(stats, "", "  ")
 	os.WriteFile(filepath.Join(corpusDir, "statistics.json"), statsJSON, 0644)
 

@@ -152,7 +152,7 @@ func GetCybersportArticles() ([]map[string]string, error) {
 				page.Mouse.MustScroll(0, 1000)
 			}
 
-			if countAfter >= 20000 {
+			if countAfter >= 2000 {
 				fmt.Printf("  %s: Limit reached.\n", tag)
 				break
 			}

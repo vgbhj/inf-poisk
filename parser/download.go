@@ -50,7 +50,7 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 	jobsChan := make(chan map[string]string, len(articles))
 	var wg sync.WaitGroup
 
-	numWorkers := workers
+	numWorkers := 2
 	if numWorkers <= 0 {
 		numWorkers = 1
 	}
@@ -87,7 +87,6 @@ func DownloadHLTVArticles(articles []map[string]string, corpusDir string, bar *p
 				if err := IsBlockedHTML(html); err != nil {
 					fmt.Printf("[HLTV] Blocked (anti-bot) %s: %v\n", articleID, err)
 					bar.Increment()
-					_ = SaveRawHTML(html, filepath.Join(hltvDir, "blocked"), htmlFilename)
 					time.Sleep(300 * time.Millisecond)
 					continue
 				}

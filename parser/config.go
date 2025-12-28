@@ -8,7 +8,6 @@ import (
 	"github.com/go-rod/rod"
 )
 
-// Article represents a parsed article
 type Article struct {
 	ID      string
 	URL     string
@@ -18,7 +17,6 @@ type Article struct {
 	Tag     string
 }
 
-// Statistics tracks download statistics
 type Statistics struct {
 	TotalArticles      int    `json:"total_articles"`
 	TotalSize          int64  `json:"total_size_bytes"`
@@ -29,7 +27,6 @@ type Statistics struct {
 	BrowserMode        bool   `json:"browser_mode"`
 }
 
-// Config holds application configuration
 type Config struct {
 	UseBrowser   bool
 	ShowBrowser  bool
@@ -41,7 +38,6 @@ type Config struct {
 }
 
 var (
-	// HTTP Client
 	HTTPClient = &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
@@ -51,13 +47,10 @@ var (
 		},
 	}
 
-	// User Agent
 	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-	// Browser instance
 	Browser *rod.Browser
 
-	// Cloudflare cookies cache
 	CFCookies   = make(map[string]string)
 	CookiesLock sync.RWMutex
 )
