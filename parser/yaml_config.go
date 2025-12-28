@@ -16,7 +16,7 @@ type YAMLConfig struct {
 
 	Logic struct {
 		DelayBetweenPages int `yaml:"delay_between_pages"`
-		ReCrawlInterval    int `yaml:"re_crawl_interval"`
+		ReCrawlInterval   int `yaml:"re_crawl_interval"`
 	} `yaml:"logic"`
 
 	Browser struct {
@@ -53,4 +53,3 @@ func LoadYAMLConfig(configPath string) (*YAMLConfig, error) {
 
 	return &config, nil
 }
-

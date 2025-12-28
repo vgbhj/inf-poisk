@@ -299,22 +299,36 @@ func AddExistingPagesToDB(corpusDir string, db *Database, source string) error {
 
 	added := 0
 	skipped := 0
+	failed := 0
+	totalSize := int64(0)
+
+	fmt.Printf("Loading existing pages to database\n")
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Source:      %s\n", source)
+	fmt.Printf("Total pages: %d\n\n", len(articles))
+
+	bar := pb.New(len(articles))
+	bar.SetTemplateString(`[{{counters . }}] {{bar . }} {{percent . }} | {{etime . }}`)
+	bar.Start()
 
 	for _, articleInfo := range articles {
 		url := urlBuilder(articleInfo)
 		normalizedURL, err := NormalizeURL(url)
 		if err != nil {
-			fmt.Printf("[%s] Failed to normalize URL %s: %v\n", source, url, err)
+			failed++
+			bar.Increment()
 			continue
 		}
 
 		exists, err := db.DocumentExists(normalizedURL)
 		if err != nil {
-			fmt.Printf("[%s] Error checking existence: %v\n", source, err)
+			failed++
+			bar.Increment()
 			continue
 		}
 		if exists {
 			skipped++
+			bar.Increment()
 			continue
 		}
 
@@ -329,22 +343,45 @@ func AddExistingPagesToDB(corpusDir string, db *Database, source string) error {
 
 		htmlBytes, err := os.ReadFile(htmlPath)
 		if err != nil {
-			fmt.Printf("[%s] File not found: %s\n", source, htmlPath)
+			failed++
+			bar.Increment()
 			continue
 		}
 
 		html := string(htmlBytes)
+		totalSize += int64(len(html))
 
 		if err := db.SaveDocument(normalizedURL, html, source); err != nil {
-			fmt.Printf("[%s] Failed to save to DB: %v\n", source, err)
+			failed++
+			bar.Increment()
 			continue
 		}
 
 		added++
-		fmt.Printf("[%s] Added to DB: %s\n", source, normalizedURL)
+		bar.Increment()
 	}
 
-	fmt.Printf("[%s] Added %d pages, skipped %d (already in DB)\n", source, added, skipped)
+	bar.Finish()
+
+	fmt.Printf("\nLoading Results\n")
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Added:           %d\n", added)
+	fmt.Printf("Skipped:         %d (already in DB)\n", skipped)
+	fmt.Printf("Errors:          %d\n", failed)
+	fmt.Printf("Data size:       %s\n", formatBytes(totalSize))
+	fmt.Printf("Size in DB (~15%%): %s\n\n", formatBytes(int64(float64(totalSize)*1.15)))
 	return nil
 }
 
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}

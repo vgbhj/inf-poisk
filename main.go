@@ -424,14 +424,11 @@ func runAddToDB() {
 	}
 	defer db.Close()
 
-	fmt.Printf("Connected to MongoDB successfully\n")
-	fmt.Printf("Adding existing %s pages to database...\n", source)
+	fmt.Printf("Connected to MongoDB\n\n")
 
 	corpusDir := "corpus"
 	if err := parser.AddExistingPagesToDB(corpusDir, db, source); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	fmt.Println("Done!")
 }

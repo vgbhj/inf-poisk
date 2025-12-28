@@ -15,12 +15,12 @@ import (
 
 type Document struct {
 	ID          primitive.ObjectID `bson:"_id,omitempty"`
-	URL         string            `bson:"url"`
-	RawHTML     string            `bson:"raw_html"`
-	Source      string            `bson:"source"`
-	CrawlTime   int64             `bson:"crawl_time"`
-	HTMLHash    string            `bson:"html_hash"`
-	LastChecked int64             `bson:"last_checked"`
+	URL         string             `bson:"url"`
+	RawHTML     string             `bson:"raw_html"`
+	Source      string             `bson:"source"`
+	CrawlTime   int64              `bson:"crawl_time"`
+	HTMLHash    string             `bson:"html_hash"`
+	LastChecked int64              `bson:"last_checked"`
 }
 
 type Database struct {
@@ -197,4 +197,3 @@ func (db *Database) GetLastProcessedURL() (string, error) {
 	}
 	return doc.URL, nil
 }
-
