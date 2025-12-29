@@ -1,46 +1,56 @@
-# Парсер
+# Информационный поиск
 
-Парсер для обкачки статей с HLTV.org и Cybersport.ru с поддержкой MongoDB.
+## Сделано
 
-### С YAML конфигом
+- ✓ 01. Добыча корпуса - `main.go` (5000+ документов о киберспорте)
+- ✓ 02. Поисковый робот - `parser/` (парсинг с HLTV.org и Cybersport.ru)
+- ✓ 03. Токенизация - `tokenizer/tokenizer.cpp` (1млн+ токенов)
+- ✓ 04. Стемминг - `stemmer/stemmer.cpp` (100k+ уникальных слов)
+- ✓ 05. Закон Ципфа - `zipf/frequency.cpp` (анализ частотности)
+- ✓ 07. Булев индекс - `search/` (инвертированный индекс)
+- ✓ 08. Булев поиск - `search/` (AND, OR, NOT запросы)
 
-Создайте `config.yaml`:
-
-```yaml
-db:
-  uri: "mongodb://localhost:27017"
-  database: "crawler_db"
-  collection: "documents"
-logic:
-  delay_between_pages: 500
-  re_crawl_interval: 86400
-workers: 4
-site: "both"
-```
-
-Запуск:
-```bash
-go run main.go config.yaml
-```
-
-### Старый режим (флаги)
+## Быстрый старт
 
 ```bash
-go run main.go -site both -workers 4
+cd search
+make clean && make
+
+# Построить индекс
+./index_builder ../corpus/cybersport/parsed index.idx
+
+# Поиск
+./searcher index.idx "cs2 and турнир"
+./searcher index.idx "победа or матч"
+./searcher index.idx "-хейтер информация"
+
+# Статистика
+./index_stats index.idx
 ```
 
-### Добавление существующих файлов в БД
+## Структура
 
-```bash
-go run main.go add-to-db -config config.yaml -source hltv
-go run main.go add-to-db -config config.yaml -source cybersport
+```
+├── main.go              # Парсер на Go
+├── parser/              # Логика парсирования
+├── corpus/              # Скачанные документы
+├── tokenizer/           # Токенизация (C++)
+├── stemmer/             # Стемминг (C++)
+├── zipf/                # Анализ Ципфа (C++)
+└── search/              # Булев поиск (C++)
 ```
 
-## Флаги (старый режим)
+## Компоненты поиска
 
-- `-site` - сайт: hltv, cybersport, both
-- `-workers` - количество воркеров
-- `-b` - использовать браузер
-- `-collect-only` - только собрать ссылки
-- `-download-only` - только скачать из CSV
+Структуры данных без STL:
+- `vector.h`, `string.h`, `hashmap.h`, `posting_list.h`
 
+Основной код:
+- `boolean_index.h` - инвертированный индекс
+- `query_parser.h` - парсер запросов
+- `boolean_searcher.h` - выполнение поиска
+
+Утилиты:
+- `index_builder` - создание индекса
+- `searcher` - поиск
+- `index_stats` - статистика
