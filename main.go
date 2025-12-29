@@ -25,6 +25,16 @@ func main() {
 			return
 		}
 
+		if firstArg == "parse" {
+			runParse()
+			return
+		}
+
+		if firstArg == "stats" {
+			runStats()
+			return
+		}
+
 		if strings.HasSuffix(firstArg, ".yaml") || strings.HasSuffix(firstArg, ".yml") {
 			if _, err := os.Stat(firstArg); err == nil {
 				runYAMLMode(firstArg)
@@ -431,4 +441,104 @@ func runAddToDB() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runParse() {
+	var site string
+	flagSet := flag.NewFlagSet("parse", flag.ExitOnError)
+	flagSet.StringVar(&site, "site", "both", "Site to parse: hltv, cybersport, or both")
+	flagSet.Parse(os.Args[2:])
+
+	corpusDir := "corpus"
+	os.MkdirAll(corpusDir, 0755)
+
+	site = strings.ToLower(site)
+	validSite := site == "hltv" || site == "cybersport" || site == "both"
+	if !validSite {
+		fmt.Printf("Invalid site, defaulting to 'both'\n")
+		site = "both"
+	}
+
+	fmt.Printf("Parsing raw documents\n")
+	fmt.Printf("=====================================\n\n")
+
+	if site == "hltv" || site == "both" {
+		fmt.Println("Processing HLTV articles...")
+		if err := parser.ProcessHLTVRawFiles(corpusDir); err != nil {
+			fmt.Printf("Error processing HLTV: %v\n", err)
+		} else {
+			fmt.Println("HLTV processing completed")
+		}
+	}
+
+	if site == "cybersport" || site == "both" {
+		fmt.Println("Processing Cybersport articles...")
+		if err := parser.ProcessCybersportRawFiles(corpusDir); err != nil {
+			fmt.Printf("Error processing Cybersport: %v\n", err)
+		} else {
+			fmt.Println("Cybersport processing completed")
+		}
+	}
+
+	fmt.Printf("\nParsing completed\n\n")
+}
+
+func runStats() {
+	corpusDir := "corpus"
+
+	fmt.Printf("\nCorpus Statistics Report\n")
+	fmt.Printf("=====================================\n")
+
+	sites := []string{"hltv", "cybersport"}
+
+	totalRawDocs := 0
+	totalRawSize := int64(0)
+	totalParsedDocs := 0
+	totalParsedSize := int64(0)
+
+	for _, site := range sites {
+		stats, err := parser.CalculateCorpusStatistics(corpusDir, site)
+		if err != nil {
+			fmt.Printf("Error calculating statistics for %s: %v\n", site, err)
+			continue
+		}
+
+		parser.PrintCorpusStatistics(stats)
+
+		totalRawDocs += stats.RawDocCount
+		totalRawSize += stats.RawTotalSize
+		totalParsedDocs += stats.ParsedDocCount
+		totalParsedSize += stats.ParsedTotalSize
+	}
+
+	fmt.Printf("Total Statistics\n")
+	fmt.Printf("=====================================\n")
+	fmt.Printf("Raw Documents:      %d\n", totalRawDocs)
+	fmt.Printf("Raw Total Size:     %s\n", formatBytesStandalone(totalRawSize))
+	if totalRawDocs > 0 {
+		fmt.Printf("Raw Average Size:   %s\n", formatBytesStandalone(totalRawSize/int64(totalRawDocs)))
+	}
+	fmt.Printf("\nParsed Documents:   %d\n", totalParsedDocs)
+	fmt.Printf("Parsed Total Size:  %s\n", formatBytesStandalone(totalParsedSize))
+	if totalParsedDocs > 0 {
+		fmt.Printf("Parsed Average Size:%s\n", formatBytesStandalone(totalParsedSize/int64(totalParsedDocs)))
+	}
+	if totalRawSize > 0 {
+		ratio := float64(totalParsedSize) / float64(totalRawSize) * 100
+		fmt.Printf("\nExtraction Ratio:   %.2f%%\n", ratio)
+	}
+	fmt.Printf("=====================================\n\n")
+}
+
+func formatBytesStandalone(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }

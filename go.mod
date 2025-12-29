@@ -6,6 +6,8 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.1
 	github.com/cheggaaa/pb/v3 v3.1.4
 	github.com/go-rod/rod v0.116.2
+	go.mongodb.org/mongo-driver v1.17.6
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -28,11 +30,9 @@ require (
 	github.com/ysmood/got v0.40.0 // indirect
 	github.com/ysmood/gson v0.7.3 // indirect
 	github.com/ysmood/leakless v0.9.0 // indirect
-	go.mongodb.org/mongo-driver v1.17.6 // indirect
 	golang.org/x/crypto v0.26.0 // indirect
 	golang.org/x/net v0.21.0 // indirect
 	golang.org/x/sync v0.8.0 // indirect
 	golang.org/x/sys v0.23.0 // indirect
 	golang.org/x/text v0.17.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
