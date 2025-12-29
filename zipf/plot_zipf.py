@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 import sys
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 if len(sys.argv) < 2:
     print("Usage: python3 plot_zipf.py <frequency_file> [output_image]")
@@ -11,46 +10,34 @@ if len(sys.argv) < 2:
 input_file = sys.argv[1]
 output_file = sys.argv[2] if len(sys.argv) > 2 else "zipf_plot.png"
 
-df = pd.read_csv(input_file, sep='\t')
+try:
+    df = pd.read_csv(input_file, sep='\t', encoding='utf-8', encoding_errors='replace')
+except Exception as e:
+    print(f"Error: {e}")
+    sys.exit(1)
 
+df = df.dropna(subset=['rank', 'frequency'])
 ranks = df['rank'].values
 frequencies = df['frequency'].values
-log_ranks = df['log_rank'].values
-log_frequencies = df['log_frequency'].values
 
-max_freq = frequencies[0]
-c_zipf = max_freq
+c_zipf = frequencies[0]
+zipf_theoretical = c_zipf / ranks
 
-zipf_frequencies = c_zipf / ranks
-log_zipf_freq = np.log10(zipf_frequencies)
+plt.figure(figsize=(10, 6))
 
-plt.figure(figsize=(12, 8))
+plt.loglog(ranks, frequencies, 'b-', label='Actual Data (Log-Log)', linewidth=1.5)
+plt.loglog(ranks, zipf_theoretical, 'r--', label="Zipf's Law (Theoretical)", linewidth=1.5)
 
-plt.subplot(2, 1, 1)
-plt.loglog(ranks, frequencies, 'b-', label='Actual data', linewidth=0.5, alpha=0.7)
-plt.loglog(ranks, zipf_frequencies, 'r--', label=f'Zipf\'s law (C={c_zipf:.2f})', linewidth=2)
 plt.xlabel('Rank (log scale)')
 plt.ylabel('Frequency (log scale)')
-plt.title('Zipf\'s Law: Frequency vs Rank')
+plt.title("Zipf's Law Distribution (Log-Log Scale)")
 plt.legend()
-plt.grid(True, alpha=0.3)
-
-plt.subplot(2, 1, 2)
-plt.plot(log_ranks, log_frequencies, 'b-', label='Actual data', linewidth=0.5, alpha=0.7)
-plt.plot(log_ranks, log_zipf_freq, 'r--', label=f'Zipf\'s law (C={c_zipf:.2f})', linewidth=2)
-plt.xlabel('log(Rank)')
-plt.ylabel('log(Frequency)')
-plt.title('Zipf\'s Law: log-log plot')
-plt.legend()
-plt.grid(True, alpha=0.3)
+plt.grid(True, which="both", ls="-", alpha=0.2)
 
 plt.tight_layout()
-plt.savefig(output_file, dpi=300, bbox_inches='tight')
-print(f"Plot saved to {output_file}")
+plt.savefig(output_file, dpi=300)
+print(f"Saved to {output_file}")
 
-if len(sys.argv) > 3 and sys.argv[3] == "--mandelbrot":
-    print("\nMandelbrot's law (optional):")
-    print("f(r) = C / (r + beta)^alpha")
-    print("To fit Mandelbrot, use scipy.optimize.curve_fit")
-    print("Typical values: alpha ≈ 1, beta ≈ 2.7")
-
+print("\n--- Анализ закона Ципфа ---")
+print(f"Наиболее частотное слово: '{df.iloc[0]['term']}' с частотой {frequencies[0]}")
+print(f"Ожидаемая частота 2-го слова: {zipf_theoretical[1]:.2f}, фактическая: {frequencies[1]}")
