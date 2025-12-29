@@ -20,9 +20,17 @@ func ParseCybersportArticleFromHTML(html string, sourceURL string) (*Article, er
 		return nil, err
 	}
 
-	title := strings.TrimSpace(doc.Find("h1").First().Text())
+	title := strings.TrimSpace(doc.Find(".n-common-article__title, h1").First().Text())
+
 	var contentBuilder strings.Builder
-	doc.Find(".post-content p").Each(func(i int, s *goquery.Selection) {
+
+	lead := strings.TrimSpace(doc.Find(".n-common-article__lead").Text())
+	if lead != "" {
+		contentBuilder.WriteString(lead)
+		contentBuilder.WriteString("\n\n")
+	}
+
+	doc.Find("[class^='paragraph_'], [data-test-id='article-content'] p, .post-content p").Each(func(i int, s *goquery.Selection) {
 		text := strings.TrimSpace(s.Text())
 		if text != "" {
 			contentBuilder.WriteString(text)
@@ -31,10 +39,9 @@ func ParseCybersportArticleFromHTML(html string, sourceURL string) (*Article, er
 	})
 
 	article := &Article{
-		ID:      "",
 		URL:     sourceURL,
 		Title:   title,
-		Content: contentBuilder.String(),
+		Content: strings.TrimSpace(contentBuilder.String()),
 	}
 
 	return article, nil
@@ -51,27 +58,23 @@ func ProcessCybersportRawFiles(corpusDir string) error {
 		return fmt.Errorf("failed to read raw directory: %w", err)
 	}
 
-	htmlFiles := 0
+	var targets []os.DirEntry
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".html") {
-			htmlFiles++
+			targets = append(targets, entry)
 		}
 	}
 
-	if htmlFiles == 0 {
+	if len(targets) == 0 {
 		return fmt.Errorf("no html files found in %s", rawDir)
 	}
 
-	bar := pb.New(htmlFiles)
+	bar := pb.New(len(targets))
 	bar.SetTemplateString(`[{{counters . }}] {{bar . }} {{percent . }} | {{etime . }}`)
 	bar.Start()
 
 	processed := 0
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".html") {
-			continue
-		}
-
+	for _, entry := range targets {
 		rawPath := filepath.Join(rawDir, entry.Name())
 		htmlBytes, err := os.ReadFile(rawPath)
 		if err != nil {
@@ -79,8 +82,7 @@ func ProcessCybersportRawFiles(corpusDir string) error {
 			continue
 		}
 
-		html := string(htmlBytes)
-		article, err := ParseCybersportArticleFromHTML(html, "")
+		article, err := ParseCybersportArticleFromHTML(string(htmlBytes), "")
 		if err != nil {
 			bar.Increment()
 			continue
@@ -89,15 +91,17 @@ func ProcessCybersportRawFiles(corpusDir string) error {
 		textFileName := strings.TrimSuffix(entry.Name(), ".html") + ".txt"
 		textPath := filepath.Join(parsedDir, textFileName)
 
-		content := fmt.Sprintf("Title: %s\n\n%s", article.Title, article.Content)
-		os.WriteFile(textPath, []byte(content), 0644)
+		output := fmt.Sprintf("%s\n\n%s", article.Title, article.Content)
+		err = os.WriteFile(textPath, []byte(output), 0644)
+		if err == nil {
+			processed++
+		}
 
-		processed++
 		bar.Increment()
 	}
 
 	bar.Finish()
-	fmt.Printf("Processed: %d/%d files\n\n", processed, htmlFiles)
+	fmt.Printf("Processed: %d/%d\n", processed, len(targets))
 
 	return nil
 }
